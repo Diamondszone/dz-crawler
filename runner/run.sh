@@ -71,7 +71,16 @@ while true; do
 
   git add -A
   git commit -m "auto: clean results (WP/WIX) $(date -u +%FT%TZ)" || true
-  git push -u origin "$OUTPUT_BRANCH" || true
+  if [ "${OUTPUT_FORCE_PUSH:-true}" = "true" ]; then
+    git push -u origin "$OUTPUT_BRANCH" --force || true
+  else
+    # fallback: coba fetch + rebase (lebih aman, tapi perlu history kompatibel)
+    git fetch origin "$OUTPUT_BRANCH" || true
+    git branch --set-upstream-to=origin/"$OUTPUT_BRANCH" || true
+    git pull --rebase || true
+    git push origin "$OUTPUT_BRANCH" || true
+  fi
+
 
   # ===== Sync state/ ke repo asal dz-crawler (dengan clone) =====
   if [ -n "${GH_TOKEN:-}" ]; then
