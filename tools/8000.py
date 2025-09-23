@@ -322,7 +322,9 @@ def scan_one_warc(crawl, warc_url, fh_ndjson):
       - hits.ndjson hanya mencatat URL BARU (wrote_new=True)
     """
     print(f"[.] WARC: {warc_url}")
-    folder = os.path.join(REPO_DIR, "results", warc_basename_from(warc_url))
+    # folder = os.path.join(REPO_DIR, "results", warc_basename_from(warc_url))
+    # Simpan per crawl: results/<crawl>/<warc_basename>/
+    folder = os.path.join(REPO_DIR, "results", crawl, warc_basename_from(warc_url))
     ensure_folder(folder)
 
     # cache dedup per-kategori (terpisah)
