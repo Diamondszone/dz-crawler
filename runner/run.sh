@@ -16,10 +16,11 @@ if ! command -v git >/dev/null 2>&1; then
   fi
 fi
 
-# ===== Identitas git (global, tidak butuh repo) =====
-git config user.name  "${GIT_USER_NAME:-Railway Bot}"
-git config user.email "${GIT_USER_EMAIL:-railway@example.com}"
-git config credential.helper store
+# ===== Identitas git (GLOBAL, supaya tidak butuh repo) =====
+git config --global user.name  "${GIT_USER_NAME:-Railway Bot}"
+git config --global user.email "${GIT_USER_EMAIL:-railway@example.com}"
+git config --global credential.helper store
+
 
 # ===== Token untuk HTTPS push =====
 # GH_TOKEN: untuk push state ke dz-crawler
