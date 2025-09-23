@@ -42,14 +42,22 @@ mkdir -p "$REPO_DIR/results" "$REPO_DIR/state" "$REPO_DIR/warc_paths_cache"
 
 OUT_DIR="$REPO_DIR/_out"
 mkdir -p "$OUT_DIR"
-git -C "$OUT_DIR" init -b "$OUTPUT_BRANCH"
+git -C "$OUT_DIR" init -b "$OUTPUT_BRANCH" >/dev/null 2>&1 || true
 git -C "$OUT_DIR" remote remove origin 2>/dev/null || true
 git -C "$OUT_DIR" remote add origin "https://${OUTPUT_GH_TOKEN}:x-oauth-basic@github.com/${OUTPUT_REMOTE_URL#https://github.com/}"
-# per-repo identity (optional)
+
+# Preload branch remote agar README/berkas lama ikut terjaga
+if git -C "$OUT_DIR" ls-remote --heads origin "$OUTPUT_BRANCH" >/dev/null 2>&1; then
+  git -C "$OUT_DIR" fetch origin "$OUTPUT_BRANCH" --depth=1 || true
+  git -C "$OUT_DIR" checkout -B "$OUTPUT_BRANCH" "origin/$OUTPUT_BRANCH" || true
+else
+  git -C "$OUT_DIR" checkout -B "$OUTPUT_BRANCH" || true
+fi
+# Per-repo identity (opsional)
 [ -n "${OUTPUT_USER_NAME:-}" ]  && git -C "$OUT_DIR" config user.name  "$OUTPUT_USER_NAME"
 [ -n "${OUTPUT_USER_EMAIL:-}" ] && git -C "$OUT_DIR" config user.email "$OUTPUT_USER_EMAIL"
 
-# guard: if .git got corrupted by previous runs, re-init
+# guard: if .git broken, reinit
 if ! git -C "$OUT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   rm -rf "$OUT_DIR/.git"
   git -C "$OUT_DIR" init -b "$OUTPUT_BRANCH"
@@ -66,33 +74,10 @@ if [ -n "${GH_TOKEN:-}" ]; then
   [ -n "${ORIGIN_USER_EMAIL:-}" ] && git -C "$ORIGIN_DIR" config user.email "$ORIGIN_USER_EMAIL"
 fi
 
-# ===== One-time backfill (optional) =====
-: "${BACKFILL_ON_START:=true}"
-BACKFILL_FLAG="$REPO_DIR/.backfilled"
-if [ "$BACKFILL_ON_START" = "true" ] && [ ! -f "$BACKFILL_FLAG" ]; then
-  echo "[backfill] syncing ALL existing results → 8k (one-time)"
-  rsync -a --delete --prune-empty-dirs \
-    --exclude='.git/' --exclude='.git/**' \
-    --include='*/' \
-    --include='WP-site*.txt' \
-    --include='WIX-site*.txt' \
-    --exclude='*' \
-    "$REPO_DIR/results/" "$OUT_DIR/"
-  git -C "$OUT_DIR" add -A
-  git -C "$OUT_DIR" commit -m "backfill: existing results (WP/WIX) $(date -u +%FT%TZ)" || echo "[backfill] nothing to commit"
-  if [ "$OUTPUT_FORCE_PUSH" = "true" ]; then
-    git -C "$OUT_DIR" push -u origin "$OUTPUT_BRANCH" --force || true
-  else
-    git -C "$OUT_DIR" push -u origin "$OUTPUT_BRANCH" || true
-  fi
-  touch "$BACKFILL_FLAG"
-  echo "[backfill] done"
-fi
-
 # ===== Cycle params =====
 : "${MAX_WARCS:=100}"
 : "${COMMIT_INTERVAL:=600}"
-ITER_FILE="$REPO_DIR/.warc_iter"   # keep WARC counter across restarts
+ITER_FILE="$REPO_DIR/.warc_iter"
 PY_SCRIPT="${PY_SCRIPT:-$REPO_DIR/tools/8000.py}"
 
 while true; do
@@ -105,7 +90,7 @@ while true; do
   while [ "$i" -le "$MAX_WARCS" ]; do
     echo "[run] WARC #$i / $MAX_WARCS"
 
-    # --- 1) process exactly one WARC (resume via state) ---
+    # --- 1) process exactly one WARC ---
     python -u "$PY_SCRIPT" \
       --max-crawls 1 \
       --max-warcs-per-crawl 1 \
@@ -113,23 +98,76 @@ while true; do
       ${SCAN_TO_YEAR:+--to-year $SCAN_TO_YEAR} \
       ${START_CRAWL_ID:+--start-crawl-id $START_CRAWL_ID}
 
-    # --- 2) flush results → 8k (mirror, protect .git) ---
-    echo "[stage] flush → repo 8k (per-WARC, mirror)"
-    rsync -a --delete --prune-empty-dirs \
-      --exclude='.git/' --exclude='.git/**' \
-      --include='*/' \
-      --include='WP-site*.txt' \
-      --include='WIX-site*.txt' \
-      --exclude='*' \
-      "$REPO_DIR/results/" "$OUT_DIR/"
-    COUNT=$(find "$OUT_DIR" -type f \( -name 'WP-site*.txt' -o -name 'WIX-site*.txt' \) | wc -l || true)
-    echo "[stage] files to push (this mirror): $COUNT"
-    git -C "$OUT_DIR" add -A
-    git -C "$OUT_DIR" commit -m "auto(per-WARC): clean results (WP/WIX) $(date -u +%FT%TZ)" || echo "[stage] nothing to commit"
-    if [ "$OUTPUT_FORCE_PUSH" = "true" ]; then
-      git -C "$OUT_DIR" push -u origin "$OUTPUT_BRANCH" --force || true
+    # --- 2) flush results → 8k (append-only; protect README & history) ---
+    echo "[stage] flush → repo 8k (per-WARC, append)"
+    HAS_FILES=$(find "$REPO_DIR/results" -type f \( -name 'WP-site*.txt' -o -name 'WIX-site*.txt' \) -print -quit || true)
+    if [ -n "$HAS_FILES" ]; then
+      # Tarik dulu remote agar README/perubahan manual ikut
+      git -C "$OUT_DIR" pull --rebase --ff-only origin "$OUTPUT_BRANCH" || true
+
+      rsync -a --prune-empty-dirs \
+        --exclude='.git/' --exclude='.git/**' \
+        --include='*/' \
+        --include='WP-site*.txt' \
+        --include='WIX-site*.txt' \
+        --exclude='*' \
+        "$REPO_DIR/results/" "$OUT_DIR/"
+
+      git -C "$OUT_DIR" add -A
+
+      # ===== Build commit message with list of Added/Updated files =====
+      CHANGES=$(git -C "$OUT_DIR" diff --cached --name-status | grep -E 'WP-site.*\.txt|WIX-site.*\.txt' || true)
+      if [ -z "$CHANGES" ]; then
+        echo "[stage] nothing to commit"
+      else
+        NEW_FILES=$(echo "$CHANGES" | awk '$1=="A"{print $2}')
+        MOD_FILES=$(echo "$CHANGES" | awk '$1=="M"{print $2}')
+
+        format_list () {
+          local list="$1" title="$2"
+          local n shown
+          n=$(echo "$list" | sed '/^$/d' | wc -l | tr -d ' ')
+          if [ "$n" -eq 0 ]; then
+            echo ""
+          else
+            echo "$title ($n):"
+            shown=$(echo "$list" | sed '/^$/d' | head -n 20 | sed 's/^/ - /')
+            echo "$shown"
+            if [ "$n" -gt 20 ]; then
+              echo " - … (+$((n-20)) more)"
+            fi
+          fi
+        }
+
+        BLK_NEW=$(format_list "$NEW_FILES" "Added")
+        BLK_MOD=$(format_list "$MOD_FILES" "Updated")
+
+        # ambil crawl/warc terakhir dari state untuk judul
+        LAST_STATE_FILE=$(ls -1t "$REPO_DIR"/state/*/done_warcs.txt 2>/dev/null | head -n1 || true)
+        if [ -n "$LAST_STATE_FILE" ]; then
+          CRAWL_ID=$(basename "$(dirname "$LAST_STATE_FILE")")
+          LAST_WARC=$(tail -n1 "$LAST_STATE_FILE" | tr -d '\r\n')
+        fi
+
+        COMMIT_TITLE="auto(per-WARC): WP/WIX results $(date -u +%FT%TZ)"
+        [ -n "${CRAWL_ID:-}" ] && COMMIT_TITLE="$COMMIT_TITLE | $CRAWL_ID"
+        [ -n "${LAST_WARC:-}" ] && COMMIT_TITLE="$COMMIT_TITLE / $LAST_WARC"
+
+        COMMIT_BODY=""
+        [ -n "$BLK_NEW" ] && COMMIT_BODY="$COMMIT_BODY$BLK_NEW\n"
+        [ -n "$BLK_MOD" ] && COMMIT_BODY="$COMMIT_BODY$BLK_MOD\n"
+
+        git -C "$OUT_DIR" commit -m "$COMMIT_TITLE" -m "$(printf "%b" "$COMMIT_BODY")" || echo "[stage] nothing to commit"
+      fi
+
+      # Push
+      if [ "$OUTPUT_FORCE_PUSH" = "true" ]; then
+        git -C "$OUT_DIR" push -u origin "$OUTPUT_BRANCH" --force-with-lease || true
+      else
+        git -C "$OUT_DIR" push -u origin "$OUTPUT_BRANCH" || true
+      fi
     else
-      git -C "$OUT_DIR" push -u origin "$OUTPUT_BRANCH" || true
+      echo "[stage] results empty → skip push (protect 8k)"
     fi
 
     # --- 3) sync state per-WARC → dz-crawler ---
@@ -148,6 +186,20 @@ while true; do
       ( cd "$ORIGIN_DIR" && git add state/ && git commit -m "sync: state per-WARC $(date -u +%FT%TZ)" || true && git push origin HEAD || true )
     else
       echo "[warn] GH_TOKEN kosong → skip sync state"
+    fi
+
+    # --- 4) cleanup processed WARC locally (keep Railway light) ---
+    LAST_STATE_FILE=$(ls -1t "$REPO_DIR"/state/*/done_warcs.txt 2>/dev/null | head -n1 || true)
+    if [ -n "$LAST_STATE_FILE" ]; then
+      CRAWL_ID=$(basename "$(dirname "$LAST_STATE_FILE")")
+      LAST_WARC=$(tail -n1 "$LAST_STATE_FILE" | tr -d '\r\n')
+      if [ -n "$CRAWL_ID" ] && [ -n "$LAST_WARC" ]; then
+        TARGET_DIR="$REPO_DIR/results/$CRAWL_ID/$LAST_WARC"
+        if [ -d "$TARGET_DIR" ]; then
+          echo "[cleanup] remove local $TARGET_DIR"
+          rm -rf "$TARGET_DIR" || true
+        fi
+      fi
     fi
 
     i=$((i+1))
