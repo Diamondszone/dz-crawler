@@ -9,6 +9,7 @@
 
 import io, os, re, sys, gzip, time, json, argparse
 import urllib.request, urllib.error, urllib.parse
+import re
 
 from urllib.parse import urlparse
 
@@ -199,11 +200,28 @@ def cache_warc_paths(cid, dest):
     return total
 
 # ===================== Output per-folder helper =====================
+# def warc_basename_from(s: str) -> str:
+#     base = os.path.basename(s)
+#     if base.endswith(".warc.gz"):
+#         base = base[:-8]
+#     return base
+
 def warc_basename_from(s: str) -> str:
+    """
+    Kembalikan nama folder WARC versi pendek:
+    CC-MAIN-YYYYMMDDhhmmss-000NN
+    (buang ekor '-ip-…' jika ada)
+    """
     base = os.path.basename(s)
     if base.endswith(".warc.gz"):
         base = base[:-8]
-    return base
+    # potong pada '-ip-' jika ada
+    cut = base.find("-ip-")
+    if cut != -1:
+        return base[:cut]
+    # fallback: ambil pola umum CC-MAIN-YYYYMMDDhhmmss-000NN
+    m = re.match(r"^(CC-MAIN-\d{14}-\d{5})", base)
+    return m.group(1) if m else base
 
 def ensure_folder(path: str):
     os.makedirs(path, exist_ok=True)
