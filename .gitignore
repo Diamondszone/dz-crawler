@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.log
+*.tmp
+.vscode/
+.idea/
+.DS_Store
+hits*.ndjson
+
+# Cache besar tidak perlu ikut repo kode
+warc_paths_cache/
+results/
