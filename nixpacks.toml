@@ -1,5 +1,5 @@
 [phases.setup]
-apt_pkgs = ["git", "ca-certificates", "tzdata", "rsync"]
+aptPkgs = ["git", "ca-certificates", "tzdata", "rsync"]
 
 [start]
 cmd = "bash runner/run.sh"
