@@ -10,6 +10,21 @@
 import io, os, re, sys, gzip, time, json, argparse
 import urllib.request, urllib.error, urllib.parse
 
+from urllib.parse import urlparse
+
+def domain_key(u: str) -> str:
+    """Kembalikan kunci dedup domain (hostname lower tanpa 'www.')."""
+    try:
+        host = (urlparse(u).netloc or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        # kalau ada port, buang
+        if ":" in host:
+            host = host.split(":", 1)[0]
+        return host
+    except Exception:
+        return ""
+
 # ===================== Konfigurasi default =====================
 # (Nilai ini bisa dioverride oleh ENV; lihat patch ENV di bawah)
 HITS_NDJSON            = False     # True = simpan audit hits.ndjson (hanya URL BARU); False = tidak tulis audit
@@ -207,17 +222,25 @@ def list_category_files(folder: str, baseprefix: str):
     return files
 
 def load_existing_urls(folder: str, baseprefix: str) -> set:
-    seen = set()
+    """
+    Muat SET domain yang sudah tersimpan (bukan URL penuh).
+    Domain key: hostname lower tanpa 'www.' (port dibuang).
+    """
+    seen_domains = set()
     for _, fpath in list_category_files(folder, baseprefix):
         try:
             with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
                 for ln in f:
                     u = ln.strip()
-                    if u:
-                        seen.add(u)
+                    if not u:
+                        continue
+                    dk = domain_key(u)
+                    if dk:
+                        seen_domains.add(dk)
         except FileNotFoundError:
             pass
-    return seen
+    return seen_domains
+
 
 def count_lines(filepath: str) -> int:
     try:
@@ -238,19 +261,29 @@ def pick_target_file(folder: str, baseprefix: str) -> str:
     return os.path.join(folder, f"{baseprefix}{new_idx}.txt")
 
 def append_uri_to_folder(folder: str, baseprefix: str, uri: str, cache_seen: set) -> bool:
+    """
+    Tulis 1 URI ke file (rolling 1000 baris), DEDUP per DOMAIN.
+    cache_seen berisi domain_key yang sudah pernah tersimpan.
+    Return True jika BARU ditulis; False jika duplikat domain / invalid.
+    """
     if not uri:
         return False
-    if uri in cache_seen:
+    dk = domain_key(uri)
+    if not dk or dk in cache_seen:
         return False
+
     target = pick_target_file(folder, baseprefix)
     if os.path.isfile(target) and count_lines(target) >= 1000:
         files = list_category_files(folder, baseprefix)
         new_idx = (files[-1][0] + 1) if files else 1
         target = os.path.join(folder, f"{baseprefix}{new_idx}.txt")
+
     with open(target, "a", encoding="utf-8") as f:
         f.write(uri.strip() + "\n")
-    cache_seen.add(uri)
+
+    cache_seen.add(dk)
     return True
+
 
 # ===================== NDJSON audit helper + rotasi =====================
 def _ndjson_path(base_path, max_bytes=10*1024*1024):
