@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ===== Pastikan git/rsync tersedia (fallback runtime installer) =====
+if ! command -v git >/dev/null 2>&1; then
+  echo "[setup] installing git/rsync..."
+  export DEBIAN_FRONTEND=noninteractive
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -y && apt-get install -y git rsync ca-certificates tzdata
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache git rsync ca-certificates tzdata
+  elif command -v microdnf >/dev/null 2>&1; then
+    microdnf install -y git rsync ca-certificates tzdata || true
+  else
+    echo "[setup] no supported package manager found; exiting"; exit 1
+  fi
+fi
+
 # ===== Identitas git =====
 git config user.name  "${GIT_USER_NAME:-Railway Bot}"
 git config user.email "${GIT_USER_EMAIL:-railway@example.com}"
@@ -18,7 +33,7 @@ git -C "$REPO_DIR" pull --ff-only || true
 
 # ===== Repo OUTPUT (akun lain) – HANYA folder WARC + WP/WIX .txt =====
 : "${OUTPUT_REMOTE_URL:=https://github.com/crawler-8k/8k.git}"
-: "${OUTPUT_GH_TOKEN:?OUTPUT_GH_TOKEN required}"         # PAT akun crawler-8k
+: "${OUTPUT_GH_TOKEN:?OUTPUT_GH_TOKEN required}"
 : "${OUTPUT_BRANCH:=main}"
 
 OUT_DIR="$REPO_DIR/_out"
@@ -35,7 +50,6 @@ mkdir -p "$REPO_DIR/results" "$REPO_DIR/state" "$REPO_DIR/warc_paths_cache"
 
 while true; do
   echo "[run] batch…"
-  # Ganti 8000.py jika skripmu bernama lain (mis. scan_wp_all_crawls_resume.py)
   python -u "$REPO_DIR/tools/8000.py" \
     ${SCAN_FROM_YEAR:+--from-year $SCAN_FROM_YEAR} \
     ${SCAN_TO_YEAR:+--to-year $SCAN_TO_YEAR} \
@@ -44,10 +58,7 @@ while true; do
     --max-warcs-per-crawl ${MAX_WARCS:-100}
 
   echo "[stage] bangun output BERSIH untuk repo 8k (hanya folder WARC + WP/WIX .txt)"
-  # Bersihkan isi _out/ (kecuali .git)
   find "$OUT_DIR" -mindepth 1 -maxdepth 1 ! -name ".git" -exec rm -rf {} +
-
-  # Salin dari REPO_DIR/results/ ke root _out/, hanya:
   rsync -a --prune-empty-dirs \
     --include="*/" \
     --include="WP-site*.txt" \
@@ -60,7 +71,6 @@ while true; do
   git commit -m "auto: clean results (WP-site*/WIX-site*) $(date -u +%FT%TZ)" || true
   git push -u origin "$OUTPUT_BRANCH" || true
 
-  # Sinkronkan progres ke repo asal (dz-crawler) agar resume selalu aman
   echo "[git] sync origin (dz-crawler) dengan state/"
   git -C "$REPO_DIR" add state/ || true
   git -C "$REPO_DIR" commit -m "sync: state $(date -u +%FT%TZ)" || true
