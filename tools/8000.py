@@ -28,6 +28,17 @@ TO_YEAR   = int(ENV_TO_YEAR)   if ENV_TO_YEAR   else DEFAULT_TO_YEAR
 START_CRAWL_ID = ENV_START_CRAWL_ID if ENV_START_CRAWL_ID else START_CRAWL_ID
 WARC_PER_CRAWL  = (ENV_WARC_PER_CRAWL or WARC_PER_CRAWL).strip().lower()
 
+
+# === CEK INDEXABILITY ===
+# Jika True: bila terdeteksi noindex (meta robots atau header X-Robots-Tag), hasil TIDAK diambil.
+CEK_INDEX = True
+# (opsional) ENV override
+ENV_CEK_INDEX = os.environ.get("CEK_INDEX")
+if ENV_CEK_INDEX is not None:
+    CEK_INDEX = ENV_CEK_INDEX.strip().lower() in ("1","true","yes","on")
+
+
+
 # =============== FLAGS OPSIONAL ===============
 def _as_bool(v, dflt):
     if v is None: return dflt
@@ -65,6 +76,17 @@ RE_WIX_GENERATOR = re.compile(
     re.I
 )
 PATTERNS_WIX = [("wix-generator", RE_WIX_GENERATOR)]
+
+
+# --- robots indexability ---
+RE_META_ROBOTS = re.compile(
+    rb'<meta[^>]+name\s*=\s*["\']robots["\'][^>]*content\s*=\s*["\']([^"\']+)["\']',
+    re.I
+)
+RE_X_ROBOTS_TAG = re.compile(rb'^\s*X-Robots-Tag\s*:\s*(.+)$', re.I | re.M)
+
+
+
 
 # =============== HELPERS ===============
 def http_get(url, timeout=TIMEOUT, max_tries=5):
@@ -250,17 +272,41 @@ def scan_one_warc(crawl, warc_url, fh_ndjson):
     try:
         with http_get(warc_url) as resp:
             with gzip.GzipFile(fileobj=resp) as gz:
-                buf = b""; target_uri = None; in_http_payload = False; domain = None
+                buf = b""
+                target_uri = None
+                in_http_payload = False
+                domain = None
+                # --- kumpulkan header HTTP untuk deteksi X-Robots-Tag ---
+                header_lines = []
+                header_noindex = False  # per record
 
-                def process_payload(payload):
-                    nonlocal total_new_wp, total_new_wx, target_uri, domain
-                    if not payload or not target_uri: return
+                def is_meta_noindex(payload: bytes) -> bool:
+                    m = RE_META_ROBOTS.search(payload)
+                    if not m:
+                        return False
+                    val = m.group(1).lower()
+                    return b"noindex" in val  # sederhana & cepat
+
+                def process_payload(payload: bytes):
+                    nonlocal total_new_wp, total_new_wx, target_uri, domain, header_noindex
+                    if not payload or not target_uri:
+                        return
+                    # --- CEK INDEXABILITY ---
+                    if CEK_INDEX:
+                        meta_noindex = is_meta_noindex(payload)
+                        if header_noindex or meta_noindex:
+                            # skip seluruh hit pada record ini
+                            return
+
+                    # --- WP ---
                     if WP_SITE_ENABLED:
                         for reason, rx in PATTERNS_WP:
                             if rx.search(payload):
                                 wrote = append_uri_to_folder(out_dir, "WP-site", target_uri, seen_wp)
                                 if wrote: total_new_wp += 1
                                 emit_hit(fh_ndjson, crawl, warc_url, target_uri, domain or "", reason, payload, wrote)
+
+                    # --- WIX ---
                     if WIX_SITE_ENABLED:
                         for reason, rx in PATTERNS_WIX:
                             if rx.search(payload):
@@ -269,19 +315,52 @@ def scan_one_warc(crawl, warc_url, fh_ndjson):
                                 emit_hit(fh_ndjson, crawl, warc_url, target_uri, domain or "", reason, payload, wrote)
 
                 for line in gz:
+                    # boundary record WARC baru
                     if line.startswith(b"WARC/"):
-                        if in_http_payload and buf: process_payload(buf)
-                        buf = b""; target_uri = None; domain = None; in_http_payload = False; continue
+                        # proses tail record sebelumnya
+                        if in_http_payload and buf:
+                            process_payload(buf)
+                        # reset state untuk record baru
+                        buf = b""
+                        target_uri = None
+                        domain = None
+                        in_http_payload = False
+                        header_lines = []
+                        header_noindex = False
+                        continue
+
+                    # ambil Target-URI
                     if line.startswith(b"WARC-Target-URI: "):
                         target_uri = line.strip().split(b" ",1)[1].decode("utf-8","ignore")
                         try: domain = urllib.parse.urlparse(target_uri).netloc.lower()
-                        except Exception: domain = ""; continue
+                        except Exception: domain = ""
                         continue
-                    if not in_http_payload and b"Content-Type:" in line and b"text/html" in line.lower(): pass
+
+                    # kumpulkan header HTTP (sebelum payload)
+                    if not in_http_payload:
+                        header_lines.append(line)
+
+                    # deteksi start payload (baris kosong setelah header HTTP)
                     if not in_http_payload and line in (b"\r\n", b"\n"):
-                        in_http_payload = True; buf = b""; continue
-                    if in_http_payload: buf += line
-                if in_http_payload and buf: process_payload(buf)
+                        # evaluasi header untuk X-Robots-Tag: noindex
+                        if CEK_INDEX and header_lines:
+                            header_blob = b"".join(header_lines)
+                            m = RE_X_ROBOTS_TAG.search(header_blob)
+                            if m:
+                                # bisa ada banyak directive: "noindex, nofollow" dll
+                                if b"noindex" in m.group(1).lower():
+                                    header_noindex = True
+                        in_http_payload = True
+                        buf = b""
+                        continue
+
+                    # kumpulkan payload HTML
+                    if in_http_payload:
+                        buf += line
+
+                # proses tail record terakhir
+                if in_http_payload and buf:
+                    process_payload(buf)
 
         print(f"    -> ditulis (WP:+{total_new_wp}, Wix:+{total_new_wx}) ke folder {out_dir}")
         return True
@@ -292,7 +371,6 @@ def scan_one_warc(crawl, warc_url, fh_ndjson):
     except Exception as e:
         print(f"[!] Error {type(e).__name__}: {e}")
     return False
-
 # =============== MAIN ===============
 def main():
     ensure_state_dir()
@@ -344,35 +422,6 @@ def main():
             print(f"[✓] {cid}: selesai (processed={processed}, total={total})")
             continue
 
-        # RANDOM kuota: cek berapa WARC yang sudah diambil utk crawl ini
-        # done_set = load_done_set(files["donewarcs"])
-        # if len(done_set) >= quota:
-        #     print(f"[i] {cid}: kuota terpenuhi ({len(done_set)}/{quota}). Skip.")
-        #     continue
-
-        # with open(files["warcpaths"], "r", encoding="utf-8") as f:
-        #     paths = [ln.strip() for ln in f if ln.strip()]
-
-        # # pilih 1 WARC acak yang belum done
-        # rand_idx = None
-        # for _ in range(30):
-        #     i = random.randrange(0, len(paths))
-        #     bn = warc_basename_from(paths[i])
-        #     if bn not in done_set:
-        #         rand_idx = i; break
-
-        # if rand_idx is None:
-        #     print(f"[i] {cid}: semua WARC sudah done ({len(done_set)}/{quota}).")
-        #     continue
-
-        # warc_url = "https://data.commoncrawl.org/" + paths[rand_idx]
-        # basename = warc_basename_from(paths[rand_idx])
-        # if scan_one_warc(cid, warc_url, fh):
-        #     append_done(files["donewarcs"], basename)
-        #     print(f"[✓] {cid}: ambil 1 acak → {basename} (progress {len(done_set)+1}/{quota})")
-        # # selesai 1 WARC utk crawl ini → biarkan run berikutnya lanjut ke crawl berikutnya
-        # break
-        
         # RANDOM kuota: cek berapa WARC yang sudah diambil utk crawl ini
         done_set = load_done_set(files["donewarcs"])
 
