@@ -74,139 +74,121 @@ if [ -n "${GH_TOKEN:-}" ]; then
   [ -n "${ORIGIN_USER_EMAIL:-}" ] && git -C "$ORIGIN_DIR" config user.email "$ORIGIN_USER_EMAIL"
 fi
 
-# ===== Cycle params =====
-: "${MAX_WARCS:=100}"
-: "${COMMIT_INTERVAL:=600}"
-ITER_FILE="$REPO_DIR/.warc_iter"
-PY_SCRIPT="${PY_SCRIPT:-$REPO_DIR/tools/8000.py}"
+# ===== Params =====
+: "${COMMIT_INTERVAL:=600}"         # JEDA saat berpindah CRAWL ID
+PY_SCRIPT="${PY_SCRIPT:-$REPO_DIR/tools/scan_wp_all_crawls_resume.py}"
+
+PREV_CRAWL_ID=""
 
 while true; do
-  echo "[run] cycle start (MAX_WARCS=$MAX_WARCS)"
+  echo "[run] start one WARC"
 
-  # restore counter
-  if [ -f "$ITER_FILE" ]; then i=$(cat "$ITER_FILE" 2>/dev/null || echo 1); else i=1; fi
-  if [ "$i" -lt 1 ] || [ "$i" -gt "$MAX_WARCS" ]; then i=1; fi
+  # --- 1) process exactly one WARC ---
+  python -u "$PY_SCRIPT" \
+    ${SCAN_FROM_YEAR:+--from-year $SCAN_FROM_YEAR} \
+    ${SCAN_TO_YEAR:+--to-year $SCAN_TO_YEAR} \
+    ${START_CRAWL_ID:+--start-crawl-id $START_CRAWL_ID}
 
-  while [ "$i" -le "$MAX_WARCS" ]; do
-    echo "[run] WARC #$i / $MAX_WARCS"
+  # --- 2) flush results → 8k (append-only; protect README & history) ---
+  echo "[stage] flush → repo 8k (append)"
+  HAS_FILES=$(find "$REPO_DIR/results" -type f \( -name 'WP-site*.txt' -o -name 'WIX-site*.txt' \) -print -quit || true)
+  if [ -n "$HAS_FILES" ]; then
+    git -C "$OUT_DIR" pull --rebase --ff-only origin "$OUTPUT_BRANCH" || true
+    rsync -a --prune-empty-dirs \
+      --exclude='.git/' --exclude='.git/**' \
+      --include='*/' \
+      --include='WP-site*.txt' \
+      --include='WIX-site*.txt' \
+      --exclude='*' \
+      "$REPO_DIR/results/" "$OUT_DIR/"
 
-    # --- 1) process exactly one WARC ---
-    python -u "$PY_SCRIPT" \
-      --max-crawls 1 \
-      --max-warcs-per-crawl 1 \
-      ${SCAN_FROM_YEAR:+--from-year $SCAN_FROM_YEAR} \
-      ${SCAN_TO_YEAR:+--to-year $SCAN_TO_YEAR} \
-      ${START_CRAWL_ID:+--start-crawl-id $START_CRAWL_ID}
+    git -C "$OUT_DIR" add -A
 
-    # --- 2) flush results → 8k (append-only; protect README & history) ---
-    echo "[stage] flush → repo 8k (per-WARC, append)"
-    HAS_FILES=$(find "$REPO_DIR/results" -type f \( -name 'WP-site*.txt' -o -name 'WIX-site*.txt' \) -print -quit || true)
-    if [ -n "$HAS_FILES" ]; then
-      # Tarik dulu remote agar README/perubahan manual ikut
-      git -C "$OUT_DIR" pull --rebase --ff-only origin "$OUTPUT_BRANCH" || true
-
-      rsync -a --prune-empty-dirs \
-        --exclude='.git/' --exclude='.git/**' \
-        --include='*/' \
-        --include='WP-site*.txt' \
-        --include='WIX-site*.txt' \
-        --exclude='*' \
-        "$REPO_DIR/results/" "$OUT_DIR/"
-
-      git -C "$OUT_DIR" add -A
-
-      # ===== Build commit message with list of Added/Updated files =====
-      CHANGES=$(git -C "$OUT_DIR" diff --cached --name-status | grep -E 'WP-site.*\.txt|WIX-site.*\.txt' || true)
-      if [ -z "$CHANGES" ]; then
-        echo "[stage] nothing to commit"
-      else
-        NEW_FILES=$(echo "$CHANGES" | awk '$1=="A"{print $2}')
-        MOD_FILES=$(echo "$CHANGES" | awk '$1=="M"{print $2}')
-
-        format_list () {
-          local list="$1" title="$2"
-          local n shown
-          n=$(echo "$list" | sed '/^$/d' | wc -l | tr -d ' ')
-          if [ "$n" -eq 0 ]; then
-            echo ""
-          else
-            echo "$title ($n):"
-            shown=$(echo "$list" | sed '/^$/d' | head -n 20 | sed 's/^/ - /')
-            echo "$shown"
-            if [ "$n" -gt 20 ]; then
-              echo " - … (+$((n-20)) more)"
-            fi
-          fi
-        }
-
-        BLK_NEW=$(format_list "$NEW_FILES" "Added")
-        BLK_MOD=$(format_list "$MOD_FILES" "Updated")
-
-        # ambil crawl/warc terakhir dari state untuk judul
-        LAST_STATE_FILE=$(ls -1t "$REPO_DIR"/state/*/done_warcs.txt 2>/dev/null | head -n1 || true)
-        if [ -n "$LAST_STATE_FILE" ]; then
-          CRAWL_ID=$(basename "$(dirname "$LAST_STATE_FILE")")
-          LAST_WARC=$(tail -n1 "$LAST_STATE_FILE" | tr -d '\r\n')
+    # build commit message (Added/Updated)
+    CHANGES=$(git -C "$OUT_DIR" diff --cached --name-status | grep -E 'WP-site.*\.txt|WIX-site.*\.txt' || true)
+    if [ -n "$CHANGES" ]; then
+      NEW_FILES=$(echo "$CHANGES" | awk '$1=="A"{print $2}')
+      MOD_FILES=$(echo "$CHANGES" | awk '$1=="M"{print $2}')
+      format_list () {
+        local list="$1" title="$2"
+        local n shown
+        n=$(echo "$list" | sed '/^$/d' | wc -l | tr -d ' ')
+        if [ "$n" -eq 0 ]; then
+          echo ""
+        else
+          echo "$title ($n):"
+          shown=$(echo "$list" | sed '/^$/d' | head -n 20 | sed 's/^/ - /')
+          echo "$shown"
+          if [ "$n" -gt 20 ]; then echo " - … (+$((n-20)) more)"; fi
         fi
+      }
+      BLK_NEW=$(format_list "$NEW_FILES" "Added")
+      BLK_MOD=$(format_list "$MOD_FILES" "Updated")
 
-        COMMIT_TITLE="auto(per-WARC): WP/WIX results $(date -u +%FT%TZ)"
-        [ -n "${CRAWL_ID:-}" ] && COMMIT_TITLE="$COMMIT_TITLE | $CRAWL_ID"
-        [ -n "${LAST_WARC:-}" ] && COMMIT_TITLE="$COMMIT_TITLE / $LAST_WARC"
-
-        COMMIT_BODY=""
-        [ -n "$BLK_NEW" ] && COMMIT_BODY="$COMMIT_BODY$BLK_NEW\n"
-        [ -n "$BLK_MOD" ] && COMMIT_BODY="$COMMIT_BODY$BLK_MOD\n"
-
-        git -C "$OUT_DIR" commit -m "$COMMIT_TITLE" -m "$(printf "%b" "$COMMIT_BODY")" || echo "[stage] nothing to commit"
+      LAST_STATE_FILE=$(ls -1t "$REPO_DIR"/state/*/done_warcs.txt 2>/dev/null | head -n1 || true)
+      if [ -n "$LAST_STATE_FILE" ]; then
+        CRAWL_ID=$(basename "$(dirname "$LAST_STATE_FILE")")
+        LAST_WARC=$(tail -n1 "$LAST_STATE_FILE" | tr -d '\r\n')
       fi
+      COMMIT_TITLE="auto(per-WARC): WP/WIX results $(date -u +%FT%TZ)"
+      [ -n "${CRAWL_ID:-}" ] && COMMIT_TITLE="$COMMIT_TITLE | $CRAWL_ID"
+      [ -n "${LAST_WARC:-}" ] && COMMIT_TITLE="$COMMIT_TITLE / $LAST_WARC"
 
-      # Push
-      if [ "$OUTPUT_FORCE_PUSH" = "true" ]; then
-        git -C "$OUT_DIR" push -u origin "$OUTPUT_BRANCH" --force-with-lease || true
-      else
-        git -C "$OUT_DIR" push -u origin "$OUTPUT_BRANCH" || true
-      fi
+      COMMIT_BODY=""
+      [ -n "$BLK_NEW" ] && COMMIT_BODY="$COMMIT_BODY$BLK_NEW\n"
+      [ -n "$BLK_MOD" ] && COMMIT_BODY="$COMMIT_BODY$BLK_MOD\n"
+
+      git -C "$OUT_DIR" commit -m "$COMMIT_TITLE" -m "$(printf "%b" "$COMMIT_BODY")" || echo "[stage] nothing to commit"
     else
-      echo "[stage] results empty → skip push (protect 8k)"
+      echo "[stage] nothing to commit"
     fi
 
-    # --- 3) sync state per-WARC → dz-crawler ---
-    if [ -n "${GH_TOKEN:-}" ]; then
-      echo "[state] sync → dz-crawler (per-WARC)"
-      if [ ! -d "$ORIGIN_DIR/.git" ]; then
-        rm -rf "$ORIGIN_DIR"
-        git clone "https://${GH_TOKEN}:x-oauth-basic@github.com/${ORIGIN_REMOTE_URL#https://github.com/}" "$ORIGIN_DIR"
-        [ -n "${ORIGIN_USER_NAME:-}" ]  && git -C "$ORIGIN_DIR" config user.name  "$ORIGIN_USER_NAME"
-        [ -n "${ORIGIN_USER_EMAIL:-}" ] && git -C "$ORIGIN_DIR" config user.email "$ORIGIN_USER_EMAIL"
-      else
-        git -C "$ORIGIN_DIR" pull --rebase || true
-      fi
-      mkdir -p "$ORIGIN_DIR/state"
-      rsync -a --delete "$REPO_DIR/state/" "$ORIGIN_DIR/state/" || true
-      ( cd "$ORIGIN_DIR" && git add state/ && git commit -m "sync: state per-WARC $(date -u +%FT%TZ)" || true && git push origin HEAD || true )
+    if [ "${OUTPUT_FORCE_PUSH:-true}" = "true" ]; then
+      git -C "$OUT_DIR" push -u origin "$OUTPUT_BRANCH" --force-with-lease || true
     else
-      echo "[warn] GH_TOKEN kosong → skip sync state"
+      git -C "$OUT_DIR" push -u origin "$OUTPUT_BRANCH" || true
     fi
+  else
+    echo "[stage] results empty → skip push (protect 8k)"
+  fi
 
-    # --- 4) cleanup processed WARC locally (keep Railway light) ---
-    LAST_STATE_FILE=$(ls -1t "$REPO_DIR"/state/*/done_warcs.txt 2>/dev/null | head -n1 || true)
-    if [ -n "$LAST_STATE_FILE" ]; then
-      CRAWL_ID=$(basename "$(dirname "$LAST_STATE_FILE")")
-      LAST_WARC=$(tail -n1 "$LAST_STATE_FILE" | tr -d '\r\n')
-      if [ -n "$CRAWL_ID" ] && [ -n "$LAST_WARC" ]; then
-        TARGET_DIR="$REPO_DIR/results/$CRAWL_ID/$LAST_WARC"
-        if [ -d "$TARGET_DIR" ]; then
-          echo "[cleanup] remove local $TARGET_DIR"
-          rm -rf "$TARGET_DIR" || true
-        fi
+  # --- 3) sync state per-WARC → dz-crawler ---
+  if [ -n "${GH_TOKEN:-}" ]; then
+    echo "[state] sync → dz-crawler"
+    if [ ! -d "$ORIGIN_DIR/.git" ]; then
+      rm -rf "$ORIGIN_DIR"
+      git clone "https://${GH_TOKEN}:x-oauth-basic@github.com/${ORIGIN_REMOTE_URL#https://github.com/}" "$ORIGIN_DIR"
+      [ -n "${ORIGIN_USER_NAME:-}" ]  && git -C "$ORIGIN_DIR" config user.name  "$ORIGIN_USER_NAME"
+      [ -n "${ORIGIN_USER_EMAIL:-}" ] && git -C "$ORIGIN_DIR" config user.email "$ORIGIN_USER_EMAIL"
+    else
+      git -C "$ORIGIN_DIR" pull --rebase || true
+    fi
+    mkdir -p "$ORIGIN_DIR/state"
+    rsync -a --delete "$REPO_DIR/state/" "$ORIGIN_DIR/state/" || true
+    ( cd "$ORIGIN_DIR" && git add state/ && git commit -m "sync: state per-WARC $(date -u +%FT%TZ)" || true && git push origin HEAD || true )
+  else
+    echo "[warn] GH_TOKEN kosong → skip sync state"
+  fi
+
+  # --- 4) cleanup processed WARC locally ---
+  LAST_STATE_FILE=$(ls -1t "$REPO_DIR"/state/*/done_warcs.txt 2>/dev/null | head -n1 || true)
+  if [ -n "$LAST_STATE_FILE" ]; then
+    CURR_CRAWL_ID=$(basename "$(dirname "$LAST_STATE_FILE")")
+    LAST_WARC=$(tail -n1 "$LAST_STATE_FILE" | tr -d '\r\n')
+    if [ -n "${CURR_CRAWL_ID:-}" ] && [ -n "${LAST_WARC:-}" ]; then
+      TARGET_DIR="$REPO_DIR/results/$CURR_CRAWL_ID/$LAST_WARC"
+      if [ -d "$TARGET_DIR" ]; then
+        echo "[cleanup] remove local $TARGET_DIR"
+        rm -rf "$TARGET_DIR" || true
       fi
     fi
+  fi
 
-    i=$((i+1))
-    echo "$i" > "$ITER_FILE"
-  done
+  # --- 5) sleep hanya saat pindah crawl ID ---
+  if [ -n "${PREV_CRAWL_ID:-}" ] && [ -n "${CURR_CRAWL_ID:-}" ] && [ "$PREV_CRAWL_ID" != "$CURR_CRAWL_ID" ]; then
+    echo "[sleep] switched crawl: $PREV_CRAWL_ID → $CURR_CRAWL_ID, sleep ${COMMIT_INTERVAL}s"
+    sleep "$COMMIT_INTERVAL"
+  fi
+  PREV_CRAWL_ID="${CURR_CRAWL_ID:-$PREV_CRAWL_ID}"
 
-  echo 1 > "$ITER_FILE"
-  echo "[sleep] COMMIT_INTERVAL=$COMMIT_INTERVAL detik"
-  sleep "$COMMIT_INTERVAL"
 done
