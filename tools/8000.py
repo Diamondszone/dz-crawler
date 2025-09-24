@@ -345,33 +345,72 @@ def main():
             continue
 
         # RANDOM kuota: cek berapa WARC yang sudah diambil utk crawl ini
+        # done_set = load_done_set(files["donewarcs"])
+        # if len(done_set) >= quota:
+        #     print(f"[i] {cid}: kuota terpenuhi ({len(done_set)}/{quota}). Skip.")
+        #     continue
+
+        # with open(files["warcpaths"], "r", encoding="utf-8") as f:
+        #     paths = [ln.strip() for ln in f if ln.strip()]
+
+        # # pilih 1 WARC acak yang belum done
+        # rand_idx = None
+        # for _ in range(30):
+        #     i = random.randrange(0, len(paths))
+        #     bn = warc_basename_from(paths[i])
+        #     if bn not in done_set:
+        #         rand_idx = i; break
+
+        # if rand_idx is None:
+        #     print(f"[i] {cid}: semua WARC sudah done ({len(done_set)}/{quota}).")
+        #     continue
+
+        # warc_url = "https://data.commoncrawl.org/" + paths[rand_idx]
+        # basename = warc_basename_from(paths[rand_idx])
+        # if scan_one_warc(cid, warc_url, fh):
+        #     append_done(files["donewarcs"], basename)
+        #     print(f"[✓] {cid}: ambil 1 acak → {basename} (progress {len(done_set)+1}/{quota})")
+        # # selesai 1 WARC utk crawl ini → biarkan run berikutnya lanjut ke crawl berikutnya
+        # break
+        
+        # RANDOM kuota: cek berapa WARC yang sudah diambil utk crawl ini
         done_set = load_done_set(files["donewarcs"])
-        if len(done_set) >= quota:
-            print(f"[i] {cid}: kuota terpenuhi ({len(done_set)}/{quota}). Skip.")
+
+        # batasi kuota efektif agar tidak > total WARC
+        effective_quota = min(quota, total)
+
+        # jika kuota terpenuhi → lanjut crawl berikutnya
+        if len(done_set) >= effective_quota:
+            print(f"[i] {cid}: kuota terpenuhi ({len(done_set)}/{effective_quota}). Skip.")
             continue
 
+        # muat semua path WARC
         with open(files["warcpaths"], "r", encoding="utf-8") as f:
             paths = [ln.strip() for ln in f if ln.strip()]
 
-        # pilih 1 WARC acak yang belum done
-        rand_idx = None
-        for _ in range(30):
-            i = random.randrange(0, len(paths))
-            bn = warc_basename_from(paths[i])
+        # hitung sisa (belum done). O(T) = jumlah WARC; untuk ~31k baris ini ringan
+        remaining = []
+        for idx, p in enumerate(paths):
+            bn = warc_basename_from(p)
             if bn not in done_set:
-                rand_idx = i; break
+                remaining.append((idx, p, bn))
 
-        if rand_idx is None:
-            print(f"[i] {cid}: semua WARC sudah done ({len(done_set)}/{quota}).")
+        if not remaining:
+            print(f"[i] {cid}: semua WARC sudah done ({len(done_set)}/{effective_quota}).")
             continue
 
-        warc_url = "https://data.commoncrawl.org/" + paths[rand_idx]
-        basename = warc_basename_from(paths[rand_idx])
-        if scan_one_warc(cid, warc_url, fh):
+        # ambil 1 acak dari sisa
+        idx_line, picked_path, basename = random.choice(remaining)
+        warc_url = "https://data.commoncrawl.org/" + picked_path
+
+        ok = scan_one_warc(cid, warc_url, fh)
+        if ok:
             append_done(files["donewarcs"], basename)
-            print(f"[✓] {cid}: ambil 1 acak → {basename} (progress {len(done_set)+1}/{quota})")
+            print(f"[✓] {cid}: ambil 1 acak → {basename} (progress {len(done_set)+1}/{effective_quota})")
+
         # selesai 1 WARC utk crawl ini → biarkan run berikutnya lanjut ke crawl berikutnya
         break
+
 
     if fh: fh.close()
     print("\n[✓] Selesai sweep 1 putaran.")
