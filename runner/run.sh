@@ -130,7 +130,8 @@ while true; do
         CRAWL_ID=$(basename "$(dirname "$LAST_STATE_FILE")")
         LAST_WARC=$(tail -n1 "$LAST_STATE_FILE" | tr -d '\r\n')
       fi
-      COMMIT_TITLE="auto(per-WARC): WP/WIX results $(date -u +%FT%TZ)"
+      # COMMIT_TITLE="auto(per-WARC): WP/WIX results $(date -u +%FT%TZ)"
+      COMMIT_TITLE="Update WP/WIX results $(date -u +%FT%TZ)"
       [ -n "${CRAWL_ID:-}" ] && COMMIT_TITLE="$COMMIT_TITLE | $CRAWL_ID"
       [ -n "${LAST_WARC:-}" ] && COMMIT_TITLE="$COMMIT_TITLE / $LAST_WARC"
 
