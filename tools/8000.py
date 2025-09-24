@@ -61,14 +61,14 @@ OUT_NDJSON_BASE        = os.path.join(REPO_DIR, "hits")
 # =============== POLA HTML (bytes) ===============
 RE_WP_COMMENTS_POST = re.compile(rb'wp-comments-post\.php', re.I)
 RE_ACTION_WP_POST   = re.compile(rb'action\s*=\s*["\'][^"\']*wp-comments-post\.php[^"\']*["\']', re.I)
-RE_COMMENT_FORM_ID  = re.compile(rb'id\s*=\s*["\']commentform["\']', re.I)
-RE_COMMENT_FORM_CLS = re.compile(rb'class\s*=\s*["\'][^"\']*\bcomment-form\b[^"\']*["\']', re.I)
+# RE_COMMENT_FORM_ID  = re.compile(rb'id\s*=\s*["\']commentform["\']', re.I)
+# RE_COMMENT_FORM_CLS = re.compile(rb'class\s*=\s*["\'][^"\']*\bcomment-form\b[^"\']*["\']', re.I)
 
 PATTERNS_WP = [
     ("wp-comments-post", RE_WP_COMMENTS_POST),
     ("action-wp-comments-post", RE_ACTION_WP_POST),
-    ("id=commentform", RE_COMMENT_FORM_ID),
-    ("class=comment-form", RE_COMMENT_FORM_CLS),
+    # ("id=commentform", RE_COMMENT_FORM_ID),
+    # ("class=comment-form", RE_COMMENT_FORM_CLS),
 ]
 
 RE_WIX_GENERATOR = re.compile(
